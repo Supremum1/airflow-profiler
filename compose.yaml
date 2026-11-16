@@ -1,0 +1,270 @@
+name: airflow-profiler
+
+x-airflow: &airflow
+  image: airflow-profiler:3.2.2
+  build: .
+  environment: &airflow-env
+    AIRFLOW__CORE__EXECUTOR: CeleryExecutor
+    AIRFLOW__CORE__PARALLELISM: ${BENCH_PARALLELISM:-8}
+    AIRFLOW__CELERY__WORKER_CONCURRENCY: ${BENCH_WORKER_CONCURRENCY:-${BENCH_PARALLELISM:-8}}
+    AIRFLOW__CELERY__WORKER_PREFETCH_MULTIPLIER: '1'
+    AIRFLOW__CELERY__OPERATION_TIMEOUT: ${BENCH_CELERY_OPERATION_TIMEOUT:-10}
+    AIRFLOW__CELERY__BROKER_URL: redis://redis:6379/0
+    AIRFLOW__CELERY__RESULT_BACKEND: db+postgresql://bench:bench@metadata/bench
+    AIRFLOW__API__SECRET_KEY: airflow-benchmark-task-log-signing-key
+    AIRFLOW__CORE__LOAD_EXAMPLES: 'false'
+    AIRFLOW__CORE__SIMPLE_AUTH_MANAGER_ALL_ADMINS: 'true'
+    AIRFLOW__CORE__EXECUTION_API_SERVER_URL: http://api:8080/execution/
+    AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://bench:bench@metadata/bench
+    AIRFLOW__API_AUTH__JWT_SECRET: local-airflow-benchmark-development-key-for-compose-only-0123456789
+    AIRFLOW__METRICS__STATSD_ON: 'true'
+    AIRFLOW__METRICS__STATSD_HOST: statsd
+    AIRFLOW__METRICS__STATSD_PORT: '9125'
+    BENCH_AIRFLOW_API: http://api:8080
+    BENCH_DATA: /opt/airflow/bench-data
+    BENCH_HTTP: http://fixture-api:8765
+    BENCH_TARGET_DB: postgresql://bench:bench@warehouse/bench
+    BENCH_CLICKHOUSE: http://clickhouse:8123
+    BENCH_PROMETHEUS: http://prometheus:9090
+    BENCH_LOKI: http://loki:3100
+    BENCH_RESOURCE_JOB: airflow-cgroups
+    BENCH_RESOURCE_URL: http://resource-metrics:9199
+  volumes:
+    - ./dags:/opt/airflow/dags:ro
+    - bench-data:/opt/airflow/bench-data
+    - airflow-logs:/opt/airflow/logs
+  depends_on: &airflow-deps
+    metadata:
+      condition: service_healthy
+    init:
+      condition: service_completed_successfully
+    statsd:
+      condition: service_started
+    redis:
+      condition: service_healthy
+
+x-postgres: &postgres
+  image: postgres:16
+  environment:
+    POSTGRES_USER: bench
+    POSTGRES_PASSWORD: bench
+    POSTGRES_DB: bench
+  healthcheck:
+    test: [CMD-SHELL, 'pg_isready -U bench -d bench']
+    interval: 2s
+    timeout: 3s
+    retries: 30
+
+services:
+  metadata:
+    <<: *postgres
+    volumes: [metadata-data:/var/lib/postgresql/data]
+  warehouse:
+    <<: *postgres
+    volumes: [warehouse-data:/var/lib/postgresql/data]
+  redis:
+    image: redis:7.4-alpine
+    healthcheck:
+      test: [CMD, redis-cli, ping]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+  init:
+    <<: *airflow
+    user: '0:0'
+    entrypoint: /bin/bash
+    command:
+      - -ec
+      - |
+        chown 50000:0 /opt/airflow/bench-data /opt/airflow/logs
+        chmod g+rwx /opt/airflow/bench-data /opt/airflow/logs
+        exec /entrypoint airflow db migrate
+    depends_on:
+      metadata:
+        condition: service_healthy
+  api:
+    <<: *airflow
+    command: api-server
+    ports: ['127.0.0.1:18080:8080']
+    healthcheck:
+      test: [CMD, curl, -fsS, 'http://localhost:8080/api/v2/monitor/health']
+      interval: 3s
+      timeout: 3s
+      retries: 40
+  scheduler:
+    <<: *airflow
+    command: scheduler
+  worker:
+    <<: *airflow
+    command: celery worker
+    environment:
+      <<: *airflow-env
+      DUMB_INIT_SETSID: '0'
+    depends_on:
+      <<: *airflow-deps
+      api:
+        condition: service_healthy
+    healthcheck:
+      test: [CMD-SHELL, 'celery --app airflow.providers.celery.executors.celery_executor.app inspect ping -d "celery@$${HOSTNAME}"']
+      interval: 10s
+      timeout: 10s
+      retries: 12
+      start_period: 20s
+    stop_grace_period: 60s
+  dag-processor:
+    <<: *airflow
+    command: dag-processor
+  process-profiler:
+    image: airflow-profiler:3.2.2
+    user: '0:0'
+    entrypoint: [python, -u, /bench/process_sampler.py]
+    command: [--output, /opt/airflow/bench-data/process-profiles, --interval, '${BENCH_PROCESS_INTERVAL:-0.5}']
+    pid: service:worker
+    cgroup: host
+    cap_add: [SYS_PTRACE]
+    volumes:
+      - ./monitoring/process_sampler.py:/bench/process_sampler.py:ro
+      - bench-data:/opt/airflow/bench-data
+      - /sys/fs/cgroup:/host-cgroup:ro
+    depends_on:
+      worker:
+        condition: service_healthy
+  runner: &runner
+    <<: *airflow
+    profiles: [runner]
+    user: '${BENCH_RUNNER_UID:-50000}:0'
+    entrypoint: [python, /bench/benchmark.py]
+    depends_on:
+      api:
+        condition: service_healthy
+      scheduler:
+        condition: service_started
+      dag-processor:
+        condition: service_started
+      worker:
+        condition: service_healthy
+      process-profiler:
+        condition: service_started
+      fixture-api:
+        condition: service_started
+      warehouse:
+        condition: service_healthy
+      clickhouse:
+        condition: service_healthy
+      prometheus:
+        condition: service_started
+      resource-metrics:
+        condition: service_healthy
+      loki:
+        condition: service_started
+      alloy:
+        condition: service_started
+    volumes:
+      - ./dags:/opt/airflow/dags:ro
+      - ./benchmark.py:/bench/benchmark.py:ro
+      - ./trace_report.py:/bench/trace_report.py:ro
+      - ./process_report.py:/bench/process_report.py:ro
+      - ./resource_report.py:/bench/resource_report.py:ro
+      - ./flow.py:/bench/flow.py:ro
+      - ./flow_report.py:/bench/flow_report.py:ro
+      - ./trace_template.html:/bench/trace_template.html:ro
+      - ./results:/bench/results
+      - bench-data:/opt/airflow/bench-data
+      - airflow-logs:/opt/airflow/logs:ro
+  flow:
+    <<: *runner
+    profiles: [flow]
+    entrypoint: [python, /bench/flow.py]
+  fixture-api:
+    image: python:3.12-slim
+    command: [python, -u, /bench/slow_http.py, --host, 0.0.0.0]
+    volumes: [./slow_http.py:/bench/slow_http.py:ro]
+  clickhouse:
+    image: clickhouse/clickhouse-server:25.8
+    environment:
+      CLICKHOUSE_USER: bench
+      CLICKHOUSE_PASSWORD: bench
+    volumes:
+      - clickhouse-data:/var/lib/clickhouse
+      - ./monitoring/clickhouse.sql:/docker-entrypoint-initdb.d/01-fixture.sql:ro
+    healthcheck:
+      test: [CMD-SHELL, 'clickhouse-client --user bench --password bench --query "EXISTS TABLE sales_mart" | grep -qx 1']
+      interval: 3s
+      timeout: 5s
+      retries: 30
+  statsd:
+    image: prom/statsd-exporter:v0.28.0
+    command: [--statsd.mapping-config=/etc/statsd/mapping.yml]
+    volumes: [./monitoring/statsd.yml:/etc/statsd/mapping.yml:ro]
+  postgres-exporter:
+    image: prometheuscommunity/postgres-exporter:v0.17.1
+    environment:
+      DATA_SOURCE_NAME: postgresql://bench:bench@metadata:5432/bench?sslmode=disable
+  resource-metrics:
+    image: python:3.12-slim
+    user: '0:0'
+    cgroup: host
+    command: [python, -u, /bench/resource_sampler.py, --output, /data/component-metrics, --process-status, /data/process-profiles/health.json]
+    volumes:
+      - ./monitoring/resource_sampler.py:/bench/resource_sampler.py:ro
+      - /sys/fs/cgroup:/host-cgroup:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - bench-data:/data
+    depends_on:
+      worker:
+        condition: service_healthy
+      scheduler:
+        condition: service_started
+      dag-processor:
+        condition: service_started
+    healthcheck:
+      test: [CMD, python, -c, 'import urllib.request; urllib.request.urlopen("http://localhost:9199/ready")']
+      interval: 2s
+      timeout: 2s
+      retries: 30
+  prometheus:
+    image: prom/prometheus:v3.5.0
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    ports: ['127.0.0.1:19090:9090']
+  loki:
+    image: grafana/loki:3.5.5
+    command: [-config.file=/etc/loki/local-config.yaml]
+    volumes: [loki-data:/tmp/loki]
+  alloy:
+    image: grafana/alloy:v1.10.2
+    user: '0:0'
+    command: [run, --storage.path=/var/lib/alloy/data, /etc/alloy/config.alloy]
+    volumes:
+      - ./monitoring/config.alloy:/etc/alloy/config.alloy:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - alloy-data:/var/lib/alloy/data
+  reports:
+    image: python:3.12-slim
+    command: [python, -m, http.server, "8000", --directory, /reports]
+    ports: ["127.0.0.1:18773:8000"]
+    volumes:
+      - ./report_index.html:/reports/index.html:ro
+      - ./results:/reports/results:ro
+  grafana:
+    image: grafana/grafana:12.1.1
+    environment:
+      GF_AUTH_ANONYMOUS_ENABLED: 'true'
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+    ports: ['127.0.0.1:13000:3000']
+    volumes:
+      - ./monitoring/grafana:/etc/grafana/provisioning:ro
+      - ./monitoring/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana-data:/var/lib/grafana
+
+volumes:
+  metadata-data:
+  warehouse-data:
+  clickhouse-data:
+  bench-data:
+  airflow-logs:
+  prometheus-data:
+  loki-data:
+  alloy-data:
+  grafana-data:

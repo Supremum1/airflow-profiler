@@ -1,0 +1,673 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Airflow · Трассировка операций</title>
+<style>
+:root{color-scheme:dark;--bg:#0d131b;--panel:#151e2a;--surface:#1b2735;--line:#2c3a4a;--text:#e6edf6;--muted:#a3b4c9;--accent:#8bd7f7;--ok:#70ddb0;--warn:#ffca80;--bad:#ff9b9b;font:14px/1.45 Inter,system-ui,sans-serif}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text)}main{max-width:1550px;margin:auto;padding:20px clamp(12px,3vw,40px)}
+h1,h2,h3,p{margin:0}h1{font-size:25px;line-height:1.2}h2{font-size:16px}h3{font-size:13px;margin-bottom:5px}p+ p{margin-top:6px}
+select,button,input{font:inherit;color:var(--text);background:var(--surface);border:1px solid var(--line);border-radius:5px;padding:5px 8px;max-width:100%}button,summary{cursor:pointer}
+:focus-visible{outline:2px solid var(--accent);outline-offset:2px}[hidden]{display:none!important}
+a{color:var(--accent);text-underline-offset:3px}.muted{color:var(--muted)}.hint{font-size:12px}.warn{color:var(--warn)}.bad{color:var(--bad)}.ok{color:var(--ok)}
+.header,.toolbar,.panel-head,.links,.legend,.chips,.log-filters{display:flex;align-items:center;flex-wrap:wrap;gap:8px 14px}.header,.panel-head{justify-content:space-between}.header{margin-bottom:14px}.header #config{margin-top:5px;overflow-wrap:anywhere}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:13px;min-width:0}.card+.card,.layout+.layout{margin-top:12px}
+.layout{display:grid;grid-template-columns:minmax(0,1.8fr) minmax(340px,1fr);gap:12px;align-items:start}.layout .card+.card{margin-top:12px}
+.metrics{display:grid;grid-template-columns:repeat(auto-fit,minmax(135px,1fr));gap:8px;margin-bottom:12px}.metric{background:var(--panel);border:1px solid var(--line);border-radius:7px;padding:8px 12px;min-width:0}.metric strong{display:block;font-size:24px;line-height:1.25;font-weight:650;font-variant-numeric:tabular-nums}.metric small{color:var(--muted);display:block;overflow-wrap:anywhere}
+.scroll{overflow:auto}table{border-collapse:collapse;width:100%;font-variant-numeric:tabular-nums}td,th{padding:6px 8px;border-bottom:1px solid var(--line);text-align:left;white-space:nowrap}th{font-size:12px;color:var(--muted);font-weight:600}td+td,th+th{text-align:right}td button{padding:2px 6px}.stage-name{text-align:left!important}.table-note{margin-top:7px}
+.chart{margin-top:7px}.chart svg{display:block;width:100%;min-width:570px;height:auto;touch-action:pan-y;cursor:crosshair}.dot{display:inline-block;width:8px;height:8px;margin-right:5px;border-radius:50%}.legend{gap:5px 12px;font-size:12px}.legend button{font-size:12px;background:transparent;border-color:transparent;padding:2px 4px;color:var(--muted)}.legend button[aria-pressed=true]{background:var(--surface);border-color:var(--line);color:var(--text)}.operations-key{margin-top:4px}.chart-controls{margin-top:6px}.chart-controls input{flex:1;min-width:90px;padding:0;accent-color:var(--accent)}
+#selection{font-variant-numeric:tabular-nums}.chips{gap:6px;margin:7px 0}.chip{background:var(--surface);border-radius:4px;padding:3px 6px;font-size:12px}.chip b{font-weight:650}.inspector section{margin-top:10px}.inspector td:first-child{white-space:normal;overflow-wrap:anywhere}.log-list{max-height:148px;overflow:auto;padding:0;margin:6px 0;list-style:none}.log-list li{padding:6px 0;border-bottom:1px solid var(--line)}.log-list code{display:block;white-space:pre-wrap;overflow-wrap:anywhere;font-size:12px}.log-filters{gap:6px;margin-top:7px}.log-filters label{font-size:12px;color:var(--muted)}.log-filters select,.log-filters input{font-size:12px;min-width:0}.log-filters input{width:130px}.log-status{margin-top:5px}
+details summary{font-weight:600}details[open]>summary{margin-bottom:6px}summary:hover{color:var(--accent)}.details{margin-top:12px}.details>details+details{margin-top:10px}.alert{margin:0 0 12px;padding:8px 12px;background:var(--panel);border-left:3px solid var(--warn);border-radius:4px}.alert p{overflow-wrap:anywhere}.alert button{margin-left:4px}.footer{margin-top:12px}.stage-bars{display:flex;width:clamp(70px,11vw,170px);height:9px;background:var(--surface);border-radius:3px;overflow:hidden}.stage-bars span{display:block;height:100%;background:var(--phase)}.phase-key{margin-top:8px}
+@media(max-width:1050px){.layout{grid-template-columns:1fr}.inspector{min-width:0}}@media(max-width:520px){.metrics{grid-template-columns:repeat(2,minmax(0,1fr))}.metric strong{font-size:19px}}
+</style>
+</head>
+<body><main>
+<header class="header">
+<div><h1 id="title"></h1><p id="config" class="muted hint"></p>
+<details class="hint"><summary>Параметры прогона</summary><div id="run-config" class="scroll"></div></details></div>
+<div class="toolbar"><a href="../process-profiles/index.html">Все режимы</a><label for="batch">Пакет</label><select id="batch"></select><a id="grafana">Grafana ↗</a></div>
+</header>
+<div id="overview" class="metrics" aria-label="Показатели пакета"></div>
+<div id="incomplete"></div>
+<div id="diagnostics"></div>
+<div class="layout" id="dashboard">
+<div>
+<section class="card">
+<div class="panel-head"><h2>Нагрузка и задачи</h2><label>Компонент <select id="component"></select></label></div>
+<div class="legend" id="legend"></div>
+<div class="chart scroll"><svg id="timeline" viewBox="0 0 900 395" role="img" aria-label="CPU, память и выполняемые операции"></svg></div>
+<div class="toolbar chart-controls"><label for="position" class="muted hint">Позиция, с</label><input id="position" type="range" min="0" value="0" step="0.1"><button id="cpu-peak" type="button">Пик CPU</button></div>
+<details class="hint operations-key"><summary>Легенда операций</summary><div class="legend" id="operation-legend"></div></details>
+</section>
+<section class="card" id="process-panel">
+<div class="panel-head"><h2>Worker: служебные процессы и задачи</h2>
+<select id="profile-task" aria-label="Процесс задачи"></select></div>
+<div class="legend hint"><span><i class="dot" style="background:#b5a1ff"></i>Celery и непривязанные</span>
+<span><i class="dot" style="background:#70cdec"></i>Процессы задач</span>
+<span><i class="dot" style="background:#8ea5be"></i>Задачи вне пакета</span></div>
+<div class="chart scroll"><svg id="process-timeline" viewBox="0 0 900 270" role="img" aria-label="PSS и CPU служебных процессов и задач"></svg></div>
+<div id="process-selection" class="scroll"></div>
+<details class="table-note"><summary>Задачи: память и CPU</summary><div id="process-tasks" class="scroll" style="max-height:300px"></div></details>
+<details class="table-note"><summary>Память на операциях</summary><div id="process-operations" class="scroll" style="max-height:300px"></div>
+<p class="hint muted">PSS основного процесса задачи: ближайший отсчёт до/после в пределах 1 с и максимум отсчётов внутри вызова. Значения не являются объёмом выделенной операцией памяти.</p></details>
+<details class="table-note hint" id="process-quality"><summary>Качество замеров</summary><div id="process-status"></div>
+<p class="muted table-note">Процесс задачи включает Python, библиотеки и код исполнения Airflow. PSS делит общие страницы между процессами. Короткие пики могут быть пропущены. Память cgroup и PSS имеют разные правила учёта.</p></details>
+</section>
+<section class="card"><div class="panel-head"><h2>Задержки по стадиям</h2>
+<select id="percentile" aria-label="Перцентиль задержек"><option value="p50">p50</option><option value="p95">p95</option></select></div>
+<div id="stages" class="scroll"></div></section>
+</div>
+<div>
+<aside class="card inspector" id="inspector" aria-label="Детали выбранного интервала">
+<div id="selection" aria-live="polite"></div>
+<section><h2>Логи</h2>
+<div class="log-filters">
+<label>Источник <select id="log-source"></select></label>
+<label>Запуск <select id="log-run"></select></label>
+<label>Стадия <select id="log-task"></select></label>
+<label>Время <select id="log-scope"><option value="interval">Выбранный интервал</option><option value="batch">Весь пакет</option><option value="context">Пакет и контекст</option></select></label>
+<label>Поиск <input id="log-search" type="search" placeholder="текст, task_id или logger"></label>
+</div>
+<p id="log-status" class="muted hint log-status" aria-live="polite"></p>
+<ul id="log-list" class="log-list"></ul>
+<button id="log-more" hidden>Показать ещё</button>
+</section></aside>
+<section class="card"><h2>Ресурсы компонентов</h2><div id="resources" class="scroll"></div></section>
+</div>
+</div>
+<section class="card details" id="details">
+<details><summary>Операции Python и ClickHouse</summary><div id="tables" class="scroll"></div>
+<details><summary>Вызовы по отдельным DAG</summary><div id="calls" class="scroll"></div></details></details>
+<details><summary>Изменения CPU</summary><div id="changes" class="scroll"></div></details>
+<details><summary>Изменения памяти</summary><div id="memory" class="scroll"></div></details>
+<details><summary>Как читать метрики</summary><p class="muted hint">CPU контейнера — среднее между отсчётами. Пунктир CPU означает интервал от 4 с. CPU операций измеряется в процессе Python, RSS — изменение его памяти за вызов. CPU процессов — по соседним отсчётам; старт и завершение между ними могут быть пропущены. PSS и память cgroup имеют разные правила учёта: их нельзя вычитать для вычисления расходов Airflow. Логи без ID сопоставлены по времени. Перекрытие по времени само по себе не объясняет пик.</p></details>
+</section>
+<footer class="links footer hint"><a href="trace.json">Трасса JSON</a><a href="series.jsonl">Сырые замеры</a></footer>
+</main>
+<script id="data" type="application/json">__TRACE_DATA__</script>
+<script>
+const {config,batches,error} = JSON.parse(document.getElementById('data').textContent);
+const byId = id => document.getElementById(id);
+const celery=config.executor==='CeleryExecutor';
+const runPrefix=config.run_prefix||config.experiment;
+const taskComponent=celery?'worker':'scheduler';
+const services = {
+  scheduler:[celery?'Scheduler':'Scheduler + LocalExecutor','#f29175'],
+  ...(celery?{worker:['Worker + задачи','#ffc26a']}:{}),
+  api:['Airflow API','#76bfff'],
+  'dag-processor':['DAG processor','#b5a1ff'],
+  metadata:['Metadata PostgreSQL','#6ad8ae'],
+  ...(celery?{redis:['Redis broker','#8ea5be']}:{})
+};
+const operationContext = {
+  'extract_csv.copyfile':'Копирование CSV из общей папки в каталог запуска.',
+  'normalize_csv.read_convert_write':'Чтение CSV, преобразование полей в числа и запись нового файла на общем томе.',
+  'run_cpu.sha256_loop':'Вычисление SHA‑256 в процессе задачи.',
+  'run_io.response_headers':'HTTP-соединение и ожидание заголовков тестового API.',
+  'run_io.read_body':'Чтение и подсчёт байтов ответа.',
+  'load_postgres.copy_stream':'Чтение CSV, подготовка строк, передача и ожидание завершения COPY в целевом PostgreSQL.',
+  'normalize_json.import_pandas':'Загрузка pandas и его зависимостей в процесс задачи.',
+  'normalize_json.decode_flatten':'Декодирование JSON и выпрямление полей через pandas.',
+  'fetch_pages.http_get':'Запрос страницы к тестовому API и ожидание ответа.',
+  'build_mart.clickhouse_insert':'Вызов ClickHouse. Серверное время доступно в таблице операций.',
+  'validate_mart.clickhouse_select':'Проверка числа групп, заказов и суммы через ClickHouse.'
+};
+const operationNames=[...new Set(batches.flatMap(batch=>batch.operations.map(op=>op.operation)))].sort();
+const chart={width:900,left:64,right:864};
+const phaseFields=['scheduled_to_queued_s','queued_to_running_s','running_s'];
+const phases=['До очереди','В очереди','В работе'];
+const phaseColors=['#b5a1ff','#ffbd73','#70cdec'];
+const component = byId('component');
+const picker = byId('batch');
+const svg = byId('timeline');
+const position = byId('position');
+const millis = stamp => Date.parse(stamp.replace(' ','T'))/1000;
+const format = (n, digits=2) => n == null ? '—' : n.toLocaleString('ru',{maximumFractionDigits:digits,minimumFractionDigits:digits});
+const median = values => {
+  if (!values.length) return null;
+  const sorted = [...values].sort((a,b)=>a-b), middle = Math.floor(sorted.length/2);
+  return sorted.length % 2 ? sorted[middle] : (sorted[middle-1]+sorted[middle])/2;
+};
+const escaped = value => String(value).replace(/[&<>"']/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const table = (headers, rows) => '<table><thead><tr>'+headers.map(v=>'<th>'+escaped(v)+'</th>').join('')+
+  '</tr></thead><tbody>'+rows.map(row=>'<tr>'+row.map(v=>'<td>'+(v && typeof v==='object'?
+    '<button data-service="'+escaped(v.service)+'" data-time="'+escaped(v.time)+'">'+escaped(v.label)+'</button>':escaped(v))+
+    '</td>').join('')+'</tr>').join('')+'</tbody></table>';
+const jump = (service,time,label) => ({service,time,label});
+const jumpButton = (service,time,label) => '<button type="button" data-service="'+escaped(service)+
+  '" data-time="'+escaped(time)+'">'+escaped(label)+'</button>';
+const chip = (label,value) => '<span class="chip">'+escaped(label)+' <b>'+escaped(value)+'</b></span>';
+const overlap = (left,right,start,end) => Math.max(0,Math.min(right,end)-Math.max(left,start));
+byId('title').textContent='Airflow · '+config.scenario;
+if(error) byId('incomplete').innerHTML='<details class="alert" open><summary>Прерванный пакет · '+
+  escaped(error.size)+' DAG</summary><p class="hint">'+escaped(error.message)+'</p>'+
+  (error.recovery_note?'<p class="hint muted">'+escaped(error.recovery_note)+'</p>':'')+'</details>';
+const flags={cpu:['cpu_iterations'],io_http:['delay','io_bytes'],etl_csv:['rows','cols'],
+  api_ingest:['pages','page_rows','delay'],clickhouse_mart:['days']};
+byId('config').textContent=(config.executor||'LocalExecutor')+' · Параллелизм '+config.parallelism;
+byId('run-config').innerHTML=table(['Параметр','Значение'],[
+  ['Executor',config.executor||'LocalExecutor'],['Параллелизм',config.parallelism],
+  ...(celery?[['Worker concurrency',config.worker_concurrency??'—'],['Celery timeout, с',config.celery_operation_timeout??1]]:[]),
+  ...(flags[config.scenario]||[]).map(key=>[key,config[key]])]);
+Object.entries(services).forEach(([key,[label,color]])=>{
+  component.add(new Option(label,key));
+  byId('legend').insertAdjacentHTML('beforeend','<button type="button" data-component="'+key+
+    '" aria-pressed="false"><i class="dot" style="background:'+color+'"></i>'+label+'</button>');
+});
+component.value=taskComponent;
+batches.forEach((batch,i)=>picker.add(new Option(batch.size+' DAG · повтор '+batch.repeat,i)));
+if(batches.length) picker.value=batches.findIndex(batch=>batch.size===Math.max(...batches.map(b=>b.size)));
+const requestedSize=Number(new URLSearchParams(location.search).get('batch'));
+const requestedIndex=batches.findIndex(batch=>batch.size===requestedSize);
+if(requestedIndex>=0) picker.value=requestedIndex;
+let selected = null;
+let selectedTime = null;
+let logLimit = 12;
+function logSources() {
+  const extra={worker:['Файл задачи Airflow','task'],'dag-processor':['Файл разбора DAG','dag-file']}[component.value];
+  byId('log-source').replaceChildren(new Option('Все',''),new Option('Контейнер (Loki)','container'),
+    ...(extra?[new Option(...extra)]:[]));
+}
+function fallbackWindow(batch,time) {
+  const start=millis(batch.released_at), end=millis(batch.finished_at);
+  return {start:Math.max(start,time-1),end:Math.min(end,time+1),cores:null};
+}
+function choose(batch, time) {
+  const service=component.value;
+  selectedTime=time;
+  selected=batch.cpu_intervals.find(r=>r.service===service && r.start<=time && time<r.end) || fallbackWindow(batch,time);
+}
+function plot(batch,start,end) {
+  const x=t=>chart.left+(chart.right-chart.left)*(t-start)/(end-start);
+  const cpus=batch.cpu_intervals.filter(row=>services[row.service] && overlap(row.start,row.end,start,end)>0);
+  const mem=(batch.timeline.memory||[]).filter(s=>services[s.labels.service])
+    .map(s=>({...s,values:s.values.filter(([t])=>t>=start&&t<=end)}));
+  let html='';
+  const text=(x,y,s,anchor='start')=>html+='<text x="'+x+'" y="'+y+'" text-anchor="'+anchor+'" font-size="13" fill="var(--muted)">'+escaped(s)+'</text>';
+  const line=(x1,y1,x2,y2,color,width=1)=>html+='<line x1="'+x1+'" y1="'+y1+'" x2="'+x2+'" y2="'+y2+'" stroke="'+color+'" stroke-width="'+width+'"/>';
+  if(selected) html+='<rect x="'+x(Math.max(start,selected.start))+'" y="10" width="'+
+    (x(Math.min(end,selected.end))-x(Math.max(start,selected.start)))+'" height="350" fill="var(--accent)" opacity=".12"/>';
+  const maxCPU=Math.max(1,...cpus.map(row=>row.cores));
+  const maxMem=Math.max(1,...mem.flatMap(s=>s.values.map(p=>p[1]/2**20)));
+  for(let i=0;i<=4;i++){
+    const part=i/4, a=115-83*part, b=231-83*part, t=start+(end-start)*part;
+    line(chart.left,a,chart.right,a,'var(--line)'); line(chart.left,b,chart.right,b,'var(--line)');
+    text(chart.left-8,a+4,format(maxCPU*part,1),'end'); text(chart.left-8,b+4,format(maxMem*part,0),'end');
+    text(x(t),381,format(t-start,1)+' с',i===4?'end':i===0?'start':'middle');
+  }
+  text(chart.left,22,'CPU, ядра'); text(chart.left,138,'Память, МиБ'); text(chart.left,254,'Задачи и операции');
+  for(const r of cpus) {
+    const y=115-83*r.cores/maxCPU;
+    const width=r.service===component.value?3:1.5;
+    const gap=r.end-r.start;
+    html+='<line x1="'+x(Math.max(r.start,start))+'" x2="'+x(Math.min(r.end,end))+'" y1="'+y+'" y2="'+y+
+      '" stroke="'+services[r.service][1]+'" stroke-width="'+width+'"'+(gap>=4?' stroke-dasharray="5 3"':'')+'><title>'+
+      escaped(services[r.service][0])+' · '+format(r.cores)+' ядра · отсчёты через '+format(gap,1)+' с</title></line>';
+  }
+  for(const s of mem) for(let i=0;i<s.values.length;i++){
+    const [t,v]=s.values[i], y=231-83*v/2**20/maxMem, color=services[s.labels.service][1];
+    html+='<circle cx="'+x(t)+'" cy="'+y+'" r="2.2" fill="'+color+'"><title>'+escaped(services[s.labels.service][0])+
+      ' · '+format(v/2**20,0)+' МиБ</title></circle>';
+    if(i){
+      const [u,w]=s.values[i-1];
+      if(t-u<=(batch.measurement_quality?.allowed_gap_seconds||8)) line(x(u),231-83*w/2**20/maxMem,x(t),y,color,s.labels.service===component.value?2:1);
+    }
+  }
+  const names=operationNames;
+  const colors=['#67a6dc','#65c5b9','#a296ed','#e48c69','#ddba64','#7f9fc0','#c686d4','#7dbc89','#e08ab3','#ad9a76','#9b8ac7','#b093ab'];
+  byId('operation-legend').innerHTML=names.map((name,i)=>'<span><i class="dot" style="background:'+
+    colors[i%colors.length]+'"></i>'+escaped(name)+'</span>').join('');
+  const count=150, bin=(end-start)/count;
+  const totals=Array.from({length:count},(_,i)=>names.map(name=>batch.operations.reduce((sum,op)=>
+    sum+(op.operation===name?overlap(op.start,op.end,start+i*bin,start+(i+1)*bin)/bin:0),0)));
+  const taskTimes=batch.tasks.filter(task=>task.start_date && task.end_date)
+    .map(task=>[millis(task.start_date),millis(task.end_date)]);
+  const running=Array.from({length:count},(_,i)=>taskTimes.reduce((sum,[left,right])=>
+    sum+overlap(left,right,start+i*bin,start+(i+1)*bin)/bin,0));
+  const scale=Math.max(1,...running,...totals.map(row=>row.reduce((a,b)=>a+b,0)));
+  totals.forEach((row,i)=>{
+    let base=354;
+    row.forEach((v,j)=>{
+      const height=84*v/scale;
+      if(height>0.08) html+='<rect x="'+x(start+i*bin)+'" y="'+(base-height)+'" width="'+((chart.right-chart.left)/count)+
+        '" height="'+height+'" fill="'+colors[j%colors.length]+'"><title>'+escaped(names[j])+': '+format(v,1)+'</title></rect>';
+      base-=height;
+    });
+  });
+  html+='<polyline fill="none" stroke="var(--text)" stroke-width="1.4" stroke-dasharray="4 3" points="'+
+    running.map((value,i)=>x(start+(i+.5)*bin)+','+(354-84*value/scale)).join(' ')+'"/>';
+  text(chart.right,254,'Пунктир · running','end');
+  text(chart.left-8,274,format(scale,0),'end'); text(chart.left-8,357,'0','end');
+  svg.innerHTML=html;
+}
+function describe(batch,start,end) {
+  const left=Math.max(start,selected.start), right=Math.min(end,selected.end);
+  const service=component.value;
+  const operations=new Map();
+  for(const op of batch.operations){
+    const duration=overlap(op.start,op.end,left,right);
+    if(!duration) continue;
+    const entry=operations.get(op.operation)||{duration:0,wall:0,cpu:0,runs:new Set()};
+    entry.duration+=duration;
+    entry.wall+=op.end-op.start;
+    entry.cpu+=op.cpu_seconds;
+    entry.runs.add(op.run_id);
+    operations.set(op.operation,entry);
+  }
+  const active=batch.tasks.filter(task=>task.start_date && task.end_date &&
+    overlap(millis(task.start_date),millis(task.end_date),left,right)>0);
+  const memory=(batch.timeline.memory||[]).filter(series=>series.labels.service===service)
+    .flatMap(series=>series.values).filter(([t])=>left<=t && t<=right).sort((a,b)=>a[0]-b[0]);
+  const previous=batch.cpu_intervals.find(row=>row.service===service && row.end===selected.start);
+  const delta=previous && selected.cores!=null ? selected.cores-previous.cores : null;
+  const timing=[format(left-start)+'–'+format(right-start)+' с'];
+  if(selected.cores!=null && selected.end-selected.start>=4)
+    timing.push('шаг CPU '+format(selected.end-selected.start,1)+' с');
+  if(selected.cores!=null && (selected.start<start || selected.end>end))
+    timing.push('отсчёт за границей пакета');
+  const metrics=[
+    chip('CPU',selected.cores==null?'—':format(selected.cores)+' ядра'),
+    ...(delta==null?[]:[chip('Δ CPU',(delta>0?'+':'')+format(delta))]),
+    chip('Память',memory.length?format(memory.at(-1)[1]/2**20,0)+' МиБ':'—'),
+    chip('Задач в интервале',active.length)
+  ];
+  const transitions=['scheduled_dttm','queued_dttm','start_date','end_date'].map((field,i)=>{
+    const count=batch.tasks.filter(task=>task[field] && millis(task[field])>=left && millis(task[field])<right).length;
+    return chip(['Scheduled','Queued','Старт','Финиш'][i],count);
+  });
+  const ops=[...operations.entries()].sort((a,b)=>b[1].duration-a[1].duration);
+  const events=(batch.airflow_events?.[service]||[]).filter(event=>left<=event.at && event.at<right);
+  const counts=new Map();
+  for(const event of events){
+    if(!counts.has(event.label)) counts.set(event.label,[]);
+    counts.get(event.label).push(event.duration_s);
+  }
+  const eventRows=[...counts.entries()].sort((a,b)=>b[1].length-a[1].length)
+    .map(([name,durations])=>[name,durations.length,...(service==='api'?[format(median(durations.filter(d=>d!=null)),3)]:[])]);
+  let html='<div class="panel-head"><h2>'+escaped(services[service][0])+'</h2></div>'+
+    '<p class="muted hint">'+timing.join(' · ')+'</p><div class="chips">'+metrics.join('')+
+    '</div><div class="chips">'+transitions.join('')+'</div>';
+  if(ops.length){
+    const showCpu=service===taskComponent;
+    const rows=ops.map(([name,op])=>[name,op.runs.size,format(op.duration,2),
+      ...(showCpu?[op.wall>.01?format(100*op.cpu/op.wall,0)+'%':'—']:[])]);
+    html+='<div class="scroll">'+table(['Операция','DAG','Задача·с',...(showCpu?['CPU / wall*']:[])],rows)+'</div>';
+    if(showCpu) html+='<p class="muted hint table-note">* По полным вызовам операции.</p>';
+  } else {
+    html+='<p class="muted hint">Нет операций в интервале</p>';
+  }
+  if(eventRows.length)
+    html+='<details class="table-note"><summary>События компонента · '+events.length+'</summary><div class="scroll">'+
+      table(['Событие','Кол-во',...(service==='api'?['p50, с']:[])],eventRows)+'</div></details>';
+  if(service==='metadata'){
+    const commits=(batch.timeline.commits||[]).filter(([t])=>left<=t && t<=right);
+    if(commits.length>=2) html+='<div class="chips">'+chip('Коммиты',commits.at(-1)[1]-commits[0][1])+'</div>';
+  }
+  byId('selection').innerHTML=html;
+}
+function renderLogs(batch) {
+  const service=component.value, start=millis(batch.released_at), end=millis(batch.finished_at);
+  const scope=byId('log-scope').value, all=scope!=='interval';
+  const pad=scope==='context'?(batch.log_context_seconds||0):0;
+  const left=all?start-pad:Math.max(start,selected.start), right=all?end+pad:Math.min(end,selected.end);
+  const source=byId('log-source').value, run=byId('log-run').value, task=byId('log-task').value;
+  const search=byId('log-search').value.trim().toLowerCase();
+  const warnings=batch.log_warnings||{};
+  const inWindow=(batch.logs?.[service]||[]).filter(row=>left<=row.at && (row.at<right || (right===end && row.at===end)));
+  const rows=inWindow.filter(row=>{
+    const ids=row.run_ids||(row.run_id?[row.run_id]:[]);
+    return (!source||source===row.source) && (!run||ids.includes(run)) && (!task||task===row.task_id) &&
+      (!search||[row.line,row.task_id,...ids].some(value=>value?.toLowerCase().includes(search)));
+  });
+  const notices=[warnings[service],warnings[service==='worker'?'worker-task':service+'-file']].filter(Boolean);
+  byId('log-status').textContent=(batch.logs ? (inWindow.length ?
+    'Записи '+Math.min(rows.length,logLimit)+' / '+rows.length+(rows.length!==inWindow.length?' · всего '+inWindow.length:'') :
+    'Нет записей за выбранное время') : 'Логи не сохранены')+
+    (notices.length?' '+notices.join(' '):'');
+  const list=byId('log-list');
+  list.replaceChildren();
+  for(const row of rows.slice(0,logLimit)){
+    const item=document.createElement('li'), meta=document.createElement('span'), code=document.createElement('code');
+    meta.className='hint muted';
+    const ids=(row.run_ids||(row.run_id?[row.run_id]:[])).map(id=>id.replace(runPrefix+'_',''));
+    meta.textContent=[format(row.at-start,3)+' с',({task:'Файл задачи','dag-file':'Файл разбора DAG'})[row.source]||'Loki',
+      ids.join(', ')||'связь по времени',row.task_id,
+      row.at<start?'до выпуска':row.at>end?'после завершения':null].filter(Boolean).join(' · ');
+    try {
+      const data=JSON.parse(row.line);
+      const errors=(data.error_detail||[]).map(e=>e.exc_type+': '+e.exc_value).join('\n');
+      code.textContent='['+(data.level||'log')+'] '+(data.event||'')+'\n'+
+        [data.logger,data.filename?data.filename+':'+data.lineno:null].filter(Boolean).join(' · ')+(errors?'\n'+errors:'');
+      const detail=document.createElement('details'), label=document.createElement('summary'), raw=document.createElement('code');
+      label.textContent='Исходная строка JSON';raw.textContent=row.line;detail.append(label,raw);
+      item.append(meta,code,detail);
+    } catch {
+      code.textContent=row.line;item.append(meta,code);
+    }
+    list.append(item);
+  }
+  byId('log-more').hidden=rows.length<=logLimit;
+}
+function renderStages(batch) {
+  const percentile=byId('percentile').value;
+  const firstScheduled=new Map();
+  for(const task of batch.tasks){
+    if(!task.scheduled_dttm) continue;
+    const time=millis(task.scheduled_dttm);
+    firstScheduled.set(task.task_id,Math.min(time,firstScheduled.get(task.task_id)??Infinity));
+  }
+  const stages=Object.entries(batch.stages).sort(([a],[b])=>
+    (firstScheduled.get(a)??Infinity)-(firstScheduled.get(b)??Infinity));
+  const totals=stages.map(([,stage])=>phaseFields.reduce((sum,key)=>sum+(stage[key]?.[percentile]??0),0));
+  const max=Math.max(.001,...totals);
+  byId('stages').innerHTML='<table><thead><tr><th>Стадия</th>'+phases.map(name=>'<th>'+name+'</th>').join('')+
+    '<th title="Длины сегментов пропорциональны значениям перцентиля каждой фазы">Фазы</th></tr></thead><tbody>'+stages.map(([name,stage])=>{
+      const cells=phaseFields.map(key=>{
+        const data=stage[key]||{};
+        return '<td title="Отсчёты · '+(data.n??0)+'">'+format(data[percentile],2)+'</td>';
+      }).join('');
+      const bars=phaseFields.map((key,i)=>'<span style="width:'+100*(stage[key]?.[percentile]??0)/max+
+        '%;--phase:'+phaseColors[i]+'"></span>').join('');
+      return '<tr><td class="stage-name">'+escaped(name)+'</td>'+cells+
+        '<td><div class="stage-bars" aria-hidden="true">'+bars+'</div></td></tr>';
+    }).join('')+'</tbody></table><div class="legend phase-key muted">'+phases.map((name,i)=>
+      '<span><i class="dot" style="background:'+phaseColors[i]+'"></i>'+name+'</span>').join('')+
+    '<span>'+percentile+', с'+(percentile==='p95'?' · минимум 20 отсчётов':'')+'</span></div>';
+}
+function tables(batch) {
+  renderStages(batch);
+  const operations={};
+  for(const op of batch.operations){
+    const key=op.task_id+' / '+op.operation;
+    const stats=(operations[key]??={source:op.source,calls:0,byRun:{},rss:[],server:[],serverCpu:[]});
+    const run=(stats.byRun[op.run_id]??={wall:0,cpu:0});
+    stats.calls++;
+    run.wall+=op.end-op.start; run.cpu+=op.cpu_seconds;
+    stats.rss.push((op.rss_after-op.rss_before)/2**20);
+    if(op.server){stats.server.push(op.server.query_duration_ms); stats.serverCpu.push(op.server.cpu_seconds);}
+  }
+  const opRows=Object.entries(operations).map(([key,s])=>[key,s.source||'—',s.calls,format(median(Object.values(s.byRun).map(r=>r.wall)),3),
+    format(median(Object.values(s.byRun).map(r=>r.cpu)),3),format(median(s.rss),2),
+    format(median(s.server),1),format(median(s.serverCpu),3)]);
+  const traced=Object.fromEntries(Object.keys(batch.stages).map(name=>[name,{}]));
+  for(const op of batch.operations) traced[op.task_id][op.run_id]=(traced[op.task_id][op.run_id]||0)+(op.end-op.start);
+  const outside=Object.keys(traced).map(name=>[name,format(median(batch.tasks.filter(t=>t.task_id===name && traced[name][t.run_id]!=null)
+    .map(t=>Math.max(0,t.running_s-traced[name][t.run_id]))),3)]);
+  byId('tables').innerHTML=
+    table(['Стадия / операция','Код','Вызовы','Wall на DAG, с','CPU на DAG, с','Δ RSS, МиБ','ClickHouse, мс','ClickHouse CPU, с'],opRows)+
+    '<p class="muted hint table-note">p50 по DAG · Δ RSS за вызов</p>'+
+    table(['Стадия','Running вне трассы, с'],outside);
+  byId('resources').innerHTML=table(['Компонент','CPU·с','CPU, ядра','Пик CPU','Память, МиБ'],
+    Object.entries(services).map(([service,[name]])=>{
+      const data=batch.resources[service]||{}, cpu=data.cpu_seconds;
+      const suffix=cpu!=null && data.cpu_measurement?.endsWith('interpolated')?' ≈':'';
+      const peak=batch.peaks[service];
+      return [name,format(cpu)+suffix,format(cpu==null?null:cpu/batch.duration_seconds)+suffix,
+        peak?jump(service,(peak.start+peak.end)/2,format(peak.cores)):'—',
+        format(data.memory_peak_bytes==null?null:data.memory_peak_bytes/2**20,1)];
+    }))+ '<p class="hint muted table-note">≈ CPU по соседним отсчётам · память — пик working set</p>';
+  const start=millis(batch.released_at), end=millis(batch.finished_at);
+  const topOps=operations=>operations.map(([name,v])=>name+' ('+format(v,1)+' задача·с)').join(', ')||'—';
+  const changes=(batch.cpu_changes||[]).filter(row=>services[row.service]).map(row=>[services[row.service][0],row.direction==='rise'?'Рост':'Спад',
+    format(row.start-start)+'–'+format(row.end-start),format(row.previous_cores)+' → '+format(row.cores),
+    topOps(row.previous_operations),topOps(row.operations),jump(row.service,(row.start+row.end)/2,'К интервалу')]);
+  byId('changes').innerHTML=changes.length?
+    table(['Компонент','Изменение','Секунды от выпуска','Ядра','Предыдущий интервал','Выбранный интервал','График и логи'],changes):
+    '<p class="muted hint">Нет соседних отсчётов с изменением CPU</p>';
+  const memoryRows=Object.entries(services).flatMap(([service,[name]])=>{
+    const samples=(batch.timeline.memory||[]).filter(series=>series.labels.service===service)
+      .flatMap(series=>series.values).sort((a,b)=>a[0]-b[0]);
+    const inside=samples.filter(([time])=>start<=time && time<=end);
+    if(!inside.length) return [];
+    const peak=inside.reduce((a,b)=>a[1]>=b[1]?a:b);
+    const before=samples.findLast(([time])=>time<start);
+    const active=new Map();
+    for(const op of batch.operations){
+      if(op.start<=peak[0] && peak[0]<op.end)
+        active.set(op.operation,(active.get(op.operation)||0)+1);
+    }
+    return [[name,format(peak[1]/2**20,1),format(peak[0]-start),
+      format(before?(peak[1]-before[1])/2**20:null,1),
+      [...active].sort((a,b)=>b[1]-a[1]).slice(0,3).map(([op,n])=>op+' × '+n).join(', ')||'—',
+      jump(service,peak[0],'К отсчёту')]];
+  });
+  byId('memory').innerHTML=table(['Компонент','Пик, МиБ','От выпуска, с','Δ к старту, МиБ','Операции','График и логи'],memoryRows);
+  const details=byId('calls').parentElement;
+  details.ontoggle=()=>{
+    if(details.open) byId('calls').innerHTML=table(['DAG run','Стадия','Операция','Код','Старт, с','Длительность, с','CPU·с'],
+      batch.operations.map(op=>[op.run_id,op.task_id,op.operation,op.source||'—',format(op.start-start,3),
+        format(op.end-op.start,3),format(op.cpu_seconds,3)]));
+  };
+  byId('calls').innerHTML='';
+  if(details.open) details.ontoggle();
+}
+function renderProcesses(batch, reset=false) {
+  const profile=batch.process_profile, panel=byId('process-panel'), select=byId('profile-task');
+  const available=profile?.available;
+  panel.hidden=!available;
+  for(const element of panel.querySelectorAll('.legend,.chart,details')) element.hidden=!available;
+  select.hidden=!available;
+  if(!available){
+    byId('process-quality').hidden=false;
+    byId('process-status').textContent='Замеров процессов нет. Для новых прогонов запустите process-profiler. Старые результаты не содержат этого разделения.';
+    byId('process-selection').innerHTML='';
+    return;
+  }
+  if(reset) select.replaceChildren(new Option('Все задачи пакета',''),...profile.tasks.map(task=>
+    new Option(task.task_id+' · '+task.run_id.replace(runPrefix+'_',''),task.ti_id)));
+  const task=profile.tasks.find(task=>task.ti_id===select.value);
+  const start=millis(batch.released_at),end=millis(batch.finished_at),time=selectedTime??(selected.start+selected.end)/2;
+  const gapLimit=Math.max(2,(profile.interval_seconds||.5)*3);
+  const nearest=points=>points.length?points.reduce((a,b)=>Math.abs(a.at-time)<=Math.abs(b.at-time)?a:b):null;
+  const closest=nearest(profile.samples), sample=closest && Math.abs(closest.at-time)<=gapLimit/2?closest:null;
+  byId('process-status').innerHTML=table(['Измерение','Значение'],[
+    ['Задачи с отсчётами',profile.matched_tasks+'/'+profile.started_tasks],
+    ...(profile.trace_pid_bindings?[['Связано по PID и времени',profile.trace_pid_bindings]]:[]),
+    ['Шаг сбора, с',format(profile.interval_seconds,2)],
+    ['Максимальный обход, мс',format(profile.max_collection_seconds*1000,0)],
+    ['CPU сборщика, ядра',format(profile.observer_avg_cores)]])+profile.warnings.map(warning=>
+      '<p class="muted table-note">'+escaped(warning)+'</p>').join('');
+  if(batch.noop_reference){
+    const ref=batch.noop_reference;
+    byId('process-status').insertAdjacentHTML('beforeend','<p class="muted table-note">'+escaped(ref.warning?'Noop: '+ref.warning:
+      'Noop '+ref.experiment+': running p50 '+format(ref.running_p50_seconds)+' с, пик PSS задачи p50 '+
+      format(ref.task_pss_peak_p50_bytes==null?null:ref.task_pss_peak_p50_bytes/2**20,1)+
+      ' МиБ, покрытие '+ref.matched_tasks+'/'+ref.started_tasks+'. Ориентир расходов запуска; среда и прогрев должны совпадать.')+'</p>');
+  }
+  const colors={service:'#b5a1ff',tasks:'#70cdec',other_tasks:'#8ea5be'};
+  const names={service:'Celery и непривязанные',tasks:task?'Задача '+task.task_id:'Процессы задач пакета',other_tasks:'Задачи вне пакета'};
+  const series=Object.keys(colors).map(key=>({key,color:colors[key],points:
+    key==='tasks' && task ? task.points : profile.samples.map(row=>({at:row.at,...row.groups[key]}))}));
+  const x=t=>chart.left+(chart.right-chart.left)*(t-start)/(end-start);
+  let html='';
+  const text=(x,y,s,anchor='start')=>html+='<text x="'+x+'" y="'+y+'" text-anchor="'+anchor+'" font-size="13" fill="var(--muted)">'+escaped(s)+'</text>';
+  if(selected) html+='<rect x="'+x(Math.max(start,selected.start))+'" y="10" width="'+
+    Math.max(0,x(Math.min(end,selected.end))-x(Math.max(start,selected.start)))+'" height="225" fill="var(--accent)" opacity=".12"/>';
+  for(const [field,top,bottom,label,divisor] of [['pss_bytes',30,110,'Память процессов: PSS, МиБ',2**20],['cores',150,230,'CPU процессов, ядра',1]]){
+    const max=Math.max(1,...series.flatMap(s=>s.points.map(p=>(p[field]??0)/divisor)));
+    text(chart.left,top-9,label);
+    for(let i=0;i<=2;i++){
+      const y=bottom-(bottom-top)*i/2;
+      html+='<line x1="'+chart.left+'" y1="'+y+'" x2="'+chart.right+'" y2="'+y+'" stroke="var(--line)"/>';
+      text(chart.left-8,y+4,format(max*i/2,field==='cores'?1:0),'end');
+    }
+    for(const s of series){
+      const points=s.points.filter(p=>start<=p.at && p.at<=end);
+      for(let i=0;i<points.length;i++){
+        const p=points[i],before=points[i-1];
+        if(p[field]==null) continue;
+        const y=bottom-(bottom-top)*p[field]/divisor/max;
+        html+='<circle cx="'+x(p.at)+'" cy="'+y+'" r="1.6" fill="'+s.color+'"><title>'+escaped(names[s.key])+' · '+format(p[field]/divisor)+'</title></circle>';
+        if(before && before[field]!=null && p.at-before.at<=gapLimit)
+          html+='<line x1="'+x(before.at)+'" y1="'+(bottom-(bottom-top)*before[field]/divisor/max)+'" x2="'+x(p.at)+'" y2="'+y+'" stroke="'+s.color+'" stroke-width="2"/>';
+      }
+    }
+  }
+  for(let i=0;i<=4;i++) text(x(start+(end-start)*i/4),258,format((end-start)*i/4,1)+' с',i===4?'end':i===0?'start':'middle');
+  byId('process-timeline').innerHTML=html;
+  const mib=value=>format(value==null?null:value/2**20,1);
+  if(sample){
+    const rows=Object.keys(colors).map(key=>{
+      let data=sample.groups[key];
+      if(key==='tasks' && task){
+        const point=nearest(task.points);
+        data=point && Math.abs(point.at-time)<=gapLimit/2?point:{};
+      }
+      return [names[key],data.count??'—',mib(data.pss_bytes),format(data.cores)];
+    });
+    const memory=sample.worker_memory;
+    byId('process-selection').innerHTML='<p class="hint muted">Отсчёт '+format(sample.at-start,2)+' с</p>'+
+      table(['Процессы','Число','PSS, МиБ','CPU, ядра'],rows)+
+      '<div class="chips">'+[['Worker cgroup',memory.current],['Анонимная',memory.anon],['Файловый кеш',memory.file],['Ядро',memory.kernel],['Swap',memory.swap]]
+      .map(([label,value])=>chip(label,mib(value)+' МиБ')).join('')+'</div>'+
+      '';
+  }else byId('process-selection').innerHTML='<p class="hint warn">Нет отсчёта процессов рядом с выбранным временем</p>';
+  byId('process-tasks').innerHTML=table(['Запуск','Стадия','Отсчёты','Процессы','Пик PSS, МиБ','Пик private, МиБ','CPU набл., с'],
+    profile.tasks.filter(row=>!task || row.ti_id===task.ti_id).sort((a,b)=>(b.pss_peak_bytes??-1)-(a.pss_peak_bytes??-1)).map(row=>[
+      row.run_id.replace(runPrefix+'_',''),row.task_id,row.samples,row.process_count,
+      mib(row.pss_peak_bytes),mib(row.private_peak_bytes),format(row.cpu_observed_seconds)]))+
+    '<p class="hint muted">Пик каждой задачи включает её дочерние процессы. Пики разных задач не суммируются. CPU — учтённые интервалы между отсчётами; края и короткие процессы могут быть пропущены.</p>';
+  const ops=new Map();
+  for(const op of batch.operations){
+    if(task && (op.run_id!==task.run_id || op.task_id!==task.task_id)) continue;
+    const data=ops.get(op.operation)||[];data.push(op.process_memory||{});ops.set(op.operation,data);
+  }
+  const med=(rows,get)=>median(rows.map(get).filter(value=>value!=null));
+  byId('process-operations').innerHTML=table(['Операция','Вызовы с пиком / все','PSS до, МиБ','Пик внутри, МиБ','PSS после, МиБ'],
+    [...ops].map(([name,rows])=>[name,rows.filter(row=>row.samples>0).length+'/'+rows.length,
+      mib(med(rows,row=>row.before?.root_pss_bytes)),mib(med(rows,row=>row.pss_peak_bytes)),mib(med(rows,row=>row.after?.root_pss_bytes))]))+
+    '<p class="hint muted">p50 по вызовам с доступными отсчётами. «—» означает отсутствие замера.</p>';
+}
+function render(reset=false) {
+  const batch=batches[Number(picker.value)], start=millis(batch.released_at), end=millis(batch.finished_at);
+  if(reset){
+    selectedTime=null;
+    selected=batch.peaks[component.value]||fallbackWindow(batch,start);
+    byId('log-scope').value='interval';
+    logSources();
+    byId('log-run').replaceChildren(new Option('Все записи',''),...batch.runs.map(({run_id})=>
+      new Option(run_id.replace(runPrefix+'_',''),run_id)));
+    byId('log-task').replaceChildren(new Option('Все записи',''),...Object.keys(batch.stages).map(id=>new Option(id,id)));
+    renderOverview(batch,start,end);
+    tables(batch);
+  }
+  position.max=end-start;
+  position.value=Math.max(0,Math.min(end-start,(selectedTime??(selected.start+selected.end)/2)-start));
+  position.setAttribute('aria-valuetext',format(Number(position.value),1)+' с');
+  byId('cpu-peak').disabled=!batch.peaks[component.value];
+  for(const button of byId('legend').querySelectorAll('button')) button.setAttribute('aria-pressed',button.dataset.component===component.value);
+  logLimit=12;
+  plot(batch,start,end);describe(batch,start,end);renderLogs(batch);
+  renderProcesses(batch,reset);
+}
+function renderOverview(batch,start,end) {
+  const cards=[
+    ['Успешные DAG',batch.successful+'/'+batch.size,batch.successful===batch.size?'ok':'bad'],
+    ['Длительность пакета',format(batch.duration_seconds,2)+' с'],
+    ['Пропускная способность',format(batch.successful_dags_per_min,1)+' DAG/мин'],
+    ['Пик running',batch.running_peak??'—']
+  ];
+  if(batch.measurement_quality) cards.push(['Измерение ресурсов',batch.measurement_quality.valid?'Полное':'Недостоверно',batch.measurement_quality.valid?'ok':'bad']);
+  byId('overview').innerHTML=cards.map(([label,value,color])=>'<div class="metric"><small>'+label+
+    '</small><strong class="'+(color||'')+'">'+escaped(value)+'</strong></div>').join('');
+  const failed=batch.tasks.filter(task=>task.state!=='success');
+  const diagnostics=batch.diagnostics||[];
+  const quality=[
+    batch.missing_traces.length?'Без трассы · '+batch.missing_traces.length:null,
+    batch.timeline_warning?'Prometheus · '+batch.timeline_warning:null,
+    batch.metrics_warning?'Ресурсы · '+batch.metrics_warning:null,
+    batch.timeline_gaps?.length?'Ресурсы · разрывы отсчётов до '+format(Math.max(...batch.timeline_gaps.map(g=>g.gap_seconds)),1)+' с':null,
+    batch.clickhouse_warning?'ClickHouse · '+batch.clickhouse_warning:null,
+    batch.events_warning?'События Loki · неполные данные':null
+  ].filter(Boolean);
+  const alerts=[
+    failed.length?'Задачи без успеха · '+failed.length:null,
+    ...diagnostics.map(row=>row.title+' · '+row.count),
+    quality.length?'Качество данных · '+quality.length:null
+  ].filter(Boolean);
+  byId('diagnostics').innerHTML=alerts.length?'<details class="alert"><summary>'+alerts.map(escaped).join(' / ')+'</summary>'+
+    (failed.length?'<p class="hint">Без перехода в running · '+failed.filter(task=>!task.start_date).length+'</p>':'')+
+    diagnostics.map(row=>'<p class="hint">'+escaped(row.title)+' · записей '+row.count+' '+
+      jumpButton(row.service,row.at,'К интервалу')+'</p>').join('')+
+    quality.map(warning=>'<p class="hint">'+escaped(warning)+'</p>').join('')+'</details>':'';
+byId('grafana').href='http://127.0.0.1:13000/d/'+(config.resource_job==='airflow-cgroups'?'airflow-cgroups':'airflow-benchmark')+'?from='+Math.round(start*1000)+'&to='+Math.round(end*1000)+'&timezone=Asia%2FQyzylorda';
+}
+picker.addEventListener('change',()=>render(true));
+byId('percentile').addEventListener('change',()=>renderStages(batches[Number(picker.value)]));
+function changeComponent(){
+  const batch=batches[Number(picker.value)];
+  logSources();
+  if(selectedTime==null) selected=batch.peaks[component.value]||fallbackWindow(batch,millis(batch.released_at));
+  else choose(batch,selectedTime);
+  render();
+}
+component.addEventListener('change',changeComponent);
+byId('legend').addEventListener('click',event=>{
+  const button=event.target.closest('button[data-component]');
+  if(!button) return;
+  component.value=button.dataset.component;
+  changeComponent();
+});
+for(const id of ['log-source','log-run','log-task','log-scope','log-search']) byId(id).addEventListener('input',()=>{
+  logLimit=12;renderLogs(batches[Number(picker.value)]);
+});
+byId('log-more').addEventListener('click',()=>{
+  logLimit+=30;renderLogs(batches[Number(picker.value)]);
+});
+document.addEventListener('click',event=>{
+  const button=event.target.closest('button[data-service]');
+  if(!button) return;
+  const batch=batches[Number(picker.value)];
+  component.value=button.dataset.service;
+  logSources();
+  for(const id of ['log-source','log-run','log-task','log-search']) byId(id).value='';
+  byId('log-scope').value='interval';
+  const end=millis(batch.finished_at), start=millis(batch.released_at);
+  choose(batch,Math.max(start,Math.min(end-.000001,Number(button.dataset.time))));
+  render();
+  byId('inspector').scrollIntoView({block:'nearest'});
+});
+function selectPosition(seconds){
+  const batch=batches[Number(picker.value)], start=millis(batch.released_at), end=millis(batch.finished_at);
+  byId('log-scope').value='interval';
+  choose(batch,Math.max(start,Math.min(end-.000001,start+seconds)));
+  render();
+}
+svg.addEventListener('click',event=>{
+  const rect=svg.getBoundingClientRect();
+  const batch=batches[Number(picker.value)];
+  const part=((event.clientX-rect.left)*chart.width/rect.width-chart.left)/(chart.right-chart.left);
+  selectPosition(part*(millis(batch.finished_at)-millis(batch.released_at)));
+});
+position.addEventListener('input',()=>selectPosition(Number(position.value)));
+byId('profile-task').addEventListener('change',()=>{
+  const batch=batches[Number(picker.value)];
+  const task=batch.process_profile?.tasks.find(row=>row.ti_id===byId('profile-task').value);
+  if(!task){byId('log-run').value='';byId('log-task').value='';render();return;}
+  component.value=taskComponent;logSources();
+  byId('log-run').value=task.run_id;byId('log-task').value=task.task_id;
+  const points=task.points.filter(point=>point.pss_bytes!=null);
+  const peak=points.length?points.reduce((a,b)=>a.pss_bytes>=b.pss_bytes?a:b):null;
+  if(peak) selectPosition(peak.at-millis(batch.released_at));
+  else render();
+});
+byId('process-timeline').addEventListener('click',event=>{
+  const rect=event.currentTarget.getBoundingClientRect(),batch=batches[Number(picker.value)];
+  const part=((event.clientX-rect.left)*chart.width/rect.width-chart.left)/(chart.right-chart.left);
+  selectPosition(part*(millis(batch.finished_at)-millis(batch.released_at)));
+});
+byId('cpu-peak').addEventListener('click',()=>{
+  const batch=batches[Number(picker.value)];
+  const peak=batch.peaks[component.value];
+  if(peak) selectPosition((peak.start+peak.end)/2-millis(batch.released_at));
+});
+if(batches.length) render(true);
+else {
+  byId('overview').textContent='Нет измеренных пакетов';
+  picker.disabled=true;
+  for(const id of ['dashboard','details','grafana']) byId(id).hidden=true;
+}
+</script>
+</body>
+</html>

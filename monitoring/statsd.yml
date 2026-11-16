@@ -1,0 +1,20 @@
+mappings:
+  - match: 'airflow.scheduler_heartbeat'
+    name: airflow_scheduler_heartbeat_total
+  - match: 'airflow.executor.open_slots'
+    name: airflow_executor_open_slots
+  - match: 'airflow.executor.queued_tasks'
+    name: airflow_executor_queued_tasks
+  - match: 'airflow.executor.running_tasks'
+    name: airflow_executor_running_tasks
+  - match: 'airflow.scheduler.scheduler_loop_duration'
+    name: airflow_scheduler_loop_seconds
+    observer_type: histogram
+    histogram_options:
+      buckets: [0.01, 0.05, 0.1, 0.25, 0.5, 1, 2, 5, 10]
+  - match: 'airflow.pool.open_slots.*'
+    name: airflow_pool_open_slots
+    labels:
+      pool: $1
+  - match: 'airflow.dag_processing.import_errors'
+    name: airflow_dag_processing_import_errors

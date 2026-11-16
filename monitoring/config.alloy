@@ -1,0 +1,35 @@
+discovery.docker "bench" {
+  host = "unix:///var/run/docker.sock"
+
+  filter {
+    name   = "label"
+    values = ["com.docker.compose.project=airflow-profiler"]
+  }
+}
+
+discovery.relabel "airflow" {
+  targets = []
+
+  rule {
+    source_labels = ["__meta_docker_container_label_com_docker_compose_service"]
+    regex         = "scheduler|worker|api|dag-processor|metadata|redis"
+    action        = "keep"
+  }
+  rule {
+    source_labels = ["__meta_docker_container_label_com_docker_compose_service"]
+    target_label  = "service"
+  }
+}
+
+loki.source.docker "airflow" {
+  host          = "unix:///var/run/docker.sock"
+  targets       = discovery.docker.bench.targets
+  relabel_rules = discovery.relabel.airflow.rules
+  forward_to    = [loki.write.local.receiver]
+}
+
+loki.write "local" {
+  endpoint {
+    url = "http://loki:3100/loki/api/v1/push"
+  }
+}

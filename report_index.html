@@ -1,0 +1,20 @@
+<!doctype html>
+<html lang="ru">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Airflow Profiler</title>
+<style>
+:root{color-scheme:dark;font:16px/1.5 system-ui;background:#0d131b;color:#e6edf6}
+body{max-width:850px;margin:48px auto;padding:0 20px}h1{font-size:28px}
+a{display:block;color:#8bd7f7;background:#151e2a;border:1px solid #2c3a4a;border-radius:8px;padding:16px;margin:12px 0;text-decoration:none}
+p{color:#a3b4c9}code{color:#e6edf6}
+</style>
+<h1>Airflow Profiler</h1>
+<a href="results/flow-profiles/index.html">Нагрузочные тесты</a>
+<a href="results/process-profiles/index.html">Профили шести нагрузок</a>
+<a href="http://localhost:13000/d/airflow-cgroups">Grafana</a>
+<a href="http://localhost:18080">Airflow</a>
+<p>Профили нагрузок появятся после первого запуска runner:</p>
+<code>docker compose run --rm runner noop --series 8 --repeats 1</code>
+<p>Раздел «Нагрузочные тесты» появится после первого запуска flow.</p>
+</html>
